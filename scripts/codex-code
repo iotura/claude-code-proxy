@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")"
+proxy_root="$(cd "$(dirname "$script_path")/.." && pwd)"
+proxy_port="${CCP_PORT:-18765}"
+state_root="${XDG_STATE_HOME:-$HOME/.local/state}"
+log_file="${CCP_CODEX_LOG_FILE:-$state_root/claude-code-proxy/codex-server.log}"
+proxy_pid=""
+
+proxy_is_healthy() {
+  CCP_HEALTH_PORT="$proxy_port" python3 -c 'import os,urllib.request; urllib.request.urlopen("http://127.0.0.1:" + os.environ["CCP_HEALTH_PORT"] + "/healthz", timeout=1)' >/dev/null 2>&1
+}
+
+stop_owned_proxy() {
+  [[ -n "$proxy_pid" ]] || return 0
+  if kill -0 "$proxy_pid" 2>/dev/null; then
+    kill -TERM "$proxy_pid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      kill -0 "$proxy_pid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL "$proxy_pid" 2>/dev/null || true
+  fi
+  wait "$proxy_pid" 2>/dev/null || true
+}
+
+cleanup() {
+  stop_owned_proxy
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+if ! proxy_is_healthy; then
+  if python3 -c 'import os,socket; s=socket.create_connection(("127.0.0.1", int(os.environ.get("CCP_PORT", "18765"))), timeout=1); s.close()' >/dev/null 2>&1; then
+    echo "Port $proxy_port is occupied by another process; stop it or set CCP_PORT." >&2
+    exit 1
+  fi
+
+  if [[ -n "${CLAUDE_CODE_PROXY_BIN:-}" ]]; then
+    proxy_bin="$CLAUDE_CODE_PROXY_BIN"
+  elif command -v claude-code-proxy >/dev/null 2>&1; then
+    proxy_bin="$(command -v claude-code-proxy)"
+  elif [[ -x "$proxy_root/target/release/claude-code-proxy" ]]; then
+    proxy_bin="$proxy_root/target/release/claude-code-proxy"
+  else
+    if ! command -v cargo >/dev/null 2>&1 && [[ -f "$HOME/.cargo/env" ]]; then
+      # shellcheck disable=SC1091
+      source "$HOME/.cargo/env"
+    fi
+    if ! command -v cargo >/dev/null 2>&1; then
+      echo "Rust/Cargo is required to build claude-code-proxy. Install it with https://rustup.rs" >&2
+      exit 1
+    fi
+    env -u OPENAI_API_KEY -u KAGGLE_KEY -u KAGGLE_USERNAME \
+      -u KAGGLE_API_TOKEN -u KAGGLE_ACCESS_TOKEN -u MODEL_PROXY_API_KEY \
+      cargo build --release --manifest-path "$proxy_root/Cargo.toml"
+    proxy_bin="$proxy_root/target/release/claude-code-proxy"
+  fi
+
+  mkdir -p "$(dirname "$log_file")"
+  CCP_ALIAS_PROVIDER=codex "$proxy_bin" serve --no-monitor >"$log_file" 2>&1 &
+  proxy_pid=$!
+  ready=0
+  for ((attempt = 0; attempt < 60; attempt++)); do
+    if proxy_is_healthy; then
+      ready=1
+      break
+    fi
+    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+      wait "$proxy_pid" 2>/dev/null || true
+      proxy_pid=""
+      if proxy_is_healthy; then
+        ready=1 # Another launcher won the startup race; leave its server alone.
+      fi
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$ready" != 1 ]]; then
+    echo "Codex proxy failed to start; see $log_file" >&2
+    exit 1
+  fi
+  if [[ -n "$proxy_pid" ]]; then
+    echo "Started a session-scoped Codex proxy; it will stop when Claude Code exits. Log: $log_file"
+  fi
+fi
+
+export ANTHROPIC_BASE_URL="${CCP_LOCAL_URL:-http://127.0.0.1:$proxy_port}"
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_AUTH_TOKEN="local-codex-proxy"
+model="${CCP_CODEX_MODEL:-sonnet}"
+export ANTHROPIC_DEFAULT_MODEL="$model"
+export ANTHROPIC_MODEL="$model"
+export ANTHROPIC_SMALL_FAST_MODEL="${CCP_CODEX_SMALL_MODEL:-haiku}"
+export CLAUDE_CODE_SUBAGENT_MODEL="${CCP_CODEX_SUBAGENT_MODEL:-sonnet}"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+
+claude --model "$model" "$@"

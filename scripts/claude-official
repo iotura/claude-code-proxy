@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Remove proxy routing inherited from a shell that normally uses the gateway.
+exec env -u ANTHROPIC_BASE_URL \
+  -u ANTHROPIC_MODEL \
+  -u ANTHROPIC_DEFAULT_HAIKU_MODEL \
+  -u ANTHROPIC_DEFAULT_SONNET_MODEL \
+  -u ANTHROPIC_DEFAULT_OPUS_MODEL \
+  -u ANTHROPIC_DEFAULT_FABLE_MODEL \
+  -u CLAUDE_CODE_SUBAGENT_MODEL \
+  claude "$@"

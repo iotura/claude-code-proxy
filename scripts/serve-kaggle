@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_root="${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy"
+config_file="${CCP_KAGGLE_CONFIG_FILE:-$config_root/kaggle.conf}"
+configured_cli="${KAGGLE_CLI:-}"
+configured_env_file="${CCP_KAGGLE_ENV_FILE:-}"
+if [[ -r "$config_file" ]]; then
+  # shellcheck disable=SC1090
+  source "$config_file"
+fi
+# Export the model allowlist when it comes from kaggle.conf; sourced shell
+# assignments are otherwise not inherited by the proxy process.
+if [[ -n "${CCP_KAGGLE_MODELS:-}" ]]; then
+  export CCP_KAGGLE_MODELS
+fi
+if [[ -n "$configured_cli" ]]; then
+  KAGGLE_CLI="$configured_cli"
+fi
+if [[ -n "$configured_env_file" ]]; then
+  CCP_KAGGLE_ENV_FILE="$configured_env_file"
+fi
+env_file="${CCP_KAGGLE_ENV_FILE:-$config_root/kaggle.env}"
+mkdir -p "$(dirname "$env_file")"
+
+# Avoid minting a fresh key and then failing on an existing listener.
+if python3 -c 'import os,socket; s=socket.create_connection(("127.0.0.1", int(os.environ.get("CCP_PORT", "18765"))), timeout=1); s.close()' >/dev/null 2>&1; then
+  if python3 -c 'import os,urllib.request; urllib.request.urlopen("http://127.0.0.1:" + os.environ.get("CCP_PORT", "18765") + "/healthz", timeout=2)' >/dev/null 2>&1; then
+    echo "claude-code-proxy is already running at http://127.0.0.1:${CCP_PORT:-18765}. Use another terminal for scripts/claude-kaggle."
+    exit 0
+  fi
+  echo "Port ${CCP_PORT:-18765} is occupied by another process; stop it or set CCP_PORT." >&2
+  exit 1
+fi
+
+KAGGLE_CLI="${KAGGLE_CLI:-$(command -v kaggle || true)}"
+if [[ -z "$KAGGLE_CLI" ]]; then
+  echo "Kaggle CLI is not configured. Run scripts/configure-kaggle once, or set KAGGLE_CLI." >&2
+  exit 1
+fi
+
+# Rustup's install script may not have updated this terminal's PATH.
+if ! command -v cargo >/dev/null 2>&1 && [[ -f "$HOME/.cargo/env" ]]; then
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+fi
+
+# Build before loading Kaggle's short-lived Model Proxy key into this process.
+# Cargo build scripts must not inherit API credentials from the runtime env.
+if [[ -n "${CLAUDE_CODE_PROXY_BIN:-}" ]]; then
+  proxy_bin="$CLAUDE_CODE_PROXY_BIN"
+elif command -v claude-code-proxy >/dev/null 2>&1; then
+  proxy_bin="$(command -v claude-code-proxy)"
+else
+  if ! command -v cargo >/dev/null 2>&1; then
+    echo "Rust/Cargo is required to build claude-code-proxy. Install it with https://rustup.rs" >&2
+    exit 1
+  fi
+  proxy_root="$(cd "$(dirname "$0")/.." && pwd)"
+  env -u MODEL_PROXY_API_KEY -u KAGGLE_KEY -u KAGGLE_USERNAME \
+    -u KAGGLE_API_TOKEN -u KAGGLE_ACCESS_TOKEN \
+    cargo build --release --manifest-path "$proxy_root/Cargo.toml"
+  proxy_bin="$proxy_root/target/release/claude-code-proxy"
+fi
+
+# Model Proxy keys expire; mint a fresh one with the existing Kaggle login.
+umask 077
+setup_dir="$(mktemp -d "${TMPDIR:-/tmp}/ccp-kaggle-init.XXXXXX")"
+trap 'rm -rf -- "$setup_dir"' EXIT
+"$KAGGLE_CLI" benchmarks init -y --env-file "$env_file" --example-file "$setup_dir/example.py" >/dev/null
+chmod 600 "$env_file"
+set -a
+# shellcheck disable=SC1090
+source "$env_file"
+set +a
+
+# Keep the local Claude Code picker to the configured allowlist. The default
+# is Kaggle Claude Sonnet 5; additional models require an explicit
+# CCP_KAGGLE_MODELS setting after checking compatibility with Claude Code.
+rm -rf -- "$setup_dir"
+trap - EXIT
+
+exec "$proxy_bin" serve --no-monitor "$@"

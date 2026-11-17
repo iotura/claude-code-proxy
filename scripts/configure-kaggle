@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_root="${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy"
+config_file="${CCP_KAGGLE_CONFIG_FILE:-$config_root/kaggle.conf}"
+
+if [[ $# -gt 2 ]]; then
+  echo "Usage: scripts/configure-kaggle [path-to-kaggle-cli] [path-to-credential-env-file]" >&2
+  exit 2
+fi
+
+kaggle_cli="${1:-$(command -v kaggle || true)}"
+if [[ -z "$kaggle_cli" ]]; then
+  echo "Kaggle CLI is not on PATH. Activate its virtual environment or pass the path to its kaggle executable." >&2
+  exit 1
+fi
+if [[ ! -x "$kaggle_cli" ]]; then
+  echo "Kaggle CLI is not executable: $kaggle_cli" >&2
+  exit 1
+fi
+if [[ "$kaggle_cli" != */* ]]; then
+  kaggle_cli="$(command -v "$kaggle_cli")"
+fi
+kaggle_cli="$(cd "$(dirname "$kaggle_cli")" && pwd)/$(basename "$kaggle_cli")"
+credential_file="${2:-$config_root/kaggle.env}"
+
+mkdir -p "$(dirname "$config_file")" "$(dirname "$credential_file")"
+umask 077
+{
+  printf 'KAGGLE_CLI=%q\n' "$kaggle_cli"
+  printf 'CCP_KAGGLE_ENV_FILE=%q\n' "$credential_file"
+} > "$config_file"
+chmod 600 "$config_file"
+
+echo "Saved Kaggle CLI and credential-file paths in $config_file"

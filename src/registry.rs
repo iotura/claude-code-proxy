@@ -87,6 +87,7 @@ impl Registry {
             "opencode".into(),
             crate::providers::opencode::advertised_models(),
         );
+        models.insert("kaggle".into(), crate::providers::kaggle::advertised_models());
 
         let mut handlers = BTreeMap::new();
         for (name, entries) in &models {
@@ -96,6 +97,7 @@ impl Registry {
                 "cursor" => Arc::new(crate::providers::cursor::CursorProvider::new()),
                 "grok" => Arc::new(crate::providers::grok::GrokProvider::new()),
                 "opencode" => Arc::new(crate::providers::opencode::OpenCodeProvider::new()),
+                "kaggle" => Arc::new(crate::providers::kaggle::KaggleProvider::new()),
                 _ => Arc::new(PlaceholderProvider::new(name, entries.clone())),
             };
             handlers.insert(name.clone(), handler);
@@ -183,6 +185,9 @@ impl Registry {
         session_affinity: Option<&AliasProvider>,
     ) -> Option<Arc<dyn Provider>> {
         let normalized = normalize_incoming_model(raw_model);
+        if normalized.starts_with(crate::providers::kaggle::MODEL_PREFIX) {
+            return self.handlers.get("kaggle").cloned();
+        }
         if is_anthropic_alias(&normalized) {
             let target = session_affinity.unwrap_or(&self.alias_provider);
             return self.handlers.get(target.as_str()).cloned();

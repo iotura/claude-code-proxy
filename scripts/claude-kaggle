@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_path="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")"
+proxy_root="$(cd "$(dirname "$script_path")/.." && pwd)"
+proxy_port="${CCP_PORT:-18765}"
+state_root="${XDG_STATE_HOME:-$HOME/.local/state}"
+log_file="${CCP_KAGGLE_LOG_FILE:-$state_root/claude-code-proxy/kaggle-server.log}"
+proxy_pid=""
+settings_file=""
+
+proxy_is_healthy() {
+  CCP_HEALTH_PORT="$proxy_port" python3 -c 'import os,urllib.request; urllib.request.urlopen("http://127.0.0.1:" + os.environ["CCP_HEALTH_PORT"] + "/healthz", timeout=1)' >/dev/null 2>&1
+}
+
+stop_owned_proxy() {
+  [[ -n "$proxy_pid" ]] || return 0
+  if kill -0 "$proxy_pid" 2>/dev/null; then
+    kill -TERM "$proxy_pid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+      kill -0 "$proxy_pid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL "$proxy_pid" 2>/dev/null || true
+  fi
+  wait "$proxy_pid" 2>/dev/null || true
+}
+
+cleanup() {
+  stop_owned_proxy
+  if [[ -n "$settings_file" ]]; then
+    rm -f -- "$settings_file"
+  fi
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+if ! proxy_is_healthy; then
+  mkdir -p "$(dirname "$log_file")"
+  "$proxy_root/scripts/serve-kaggle" >"$log_file" 2>&1 &
+  proxy_pid=$!
+  ready=0
+  for ((attempt = 0; attempt < 300; attempt++)); do
+    if proxy_is_healthy; then
+      ready=1
+      break
+    fi
+    if ! kill -0 "$proxy_pid" 2>/dev/null; then
+      wait "$proxy_pid" 2>/dev/null || true
+      proxy_pid=""
+      if proxy_is_healthy; then
+        ready=1 # Another launcher won the startup race; leave its server alone.
+      fi
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$ready" != 1 ]]; then
+    echo "Kaggle proxy failed to start; see $log_file" >&2
+    exit 1
+  fi
+  if [[ -n "$proxy_pid" ]]; then
+    echo "Started a session-scoped Kaggle proxy; it will stop when Claude Code exits. Log: $log_file"
+  fi
+fi
+
+export ANTHROPIC_BASE_URL="${CCP_LOCAL_URL:-http://127.0.0.1:$proxy_port}"
+# Force Claude Code to authenticate to the local gateway instead of using
+# Claude.ai OAuth. The proxy ignores this local placeholder and authenticates
+# upstream with Kaggle credentials.
+unset ANTHROPIC_API_KEY
+export ANTHROPIC_AUTH_TOKEN="local-kaggle-proxy"
+model="${CCP_KAGGLE_MODEL:-kaggle/anthropic/claude-sonnet-5@default}"
+export ANTHROPIC_DEFAULT_MODEL="$model"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$model"
+export ANTHROPIC_DEFAULT_SONNET_MODEL_NAME="Kaggle Claude Sonnet 5"
+export ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION="Kaggle Claude Sonnet 5 for the main coding model"
+export CLAUDE_CODE_MAX_CONTEXT_TOKENS="${CCP_KAGGLE_CONTEXT_TOKENS:-1000000}"
+export CLAUDE_CODE_SUBAGENT_MODEL="$model"
+
+# Build this session's model picker from the Kaggle catalog advertised by the
+# running proxy. This avoids showing unrelated Anthropic models (such as Fable)
+# and lets Kaggle's freshly supplied local model list drive the choices.
+settings_file="$(mktemp "${TMPDIR:-/tmp}/claude-kaggle-settings.XXXXXX")"
+python3 "$proxy_root/scripts/kaggle-model-picker.py" "$ANTHROPIC_BASE_URL" "$settings_file"
+claude --settings "$settings_file" --model "$model" "$@"

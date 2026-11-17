@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+config_root="${XDG_CONFIG_HOME:-$HOME/.config}/claude-code-proxy"
+config_file="${CCP_KAGGLE_CONFIG_FILE:-$config_root/kaggle.conf}"
+configured_cli="${KAGGLE_CLI:-}"
+if [[ -r "$config_file" ]]; then
+  # shellcheck disable=SC1090
+  source "$config_file"
+fi
+if [[ -n "$configured_cli" ]]; then
+  KAGGLE_CLI="$configured_cli"
+fi
+KAGGLE_CLI="${KAGGLE_CLI:-$(command -v kaggle || true)}"
+if [[ -z "$KAGGLE_CLI" ]]; then
+  echo "Kaggle CLI is not configured. Run scripts/configure-kaggle once, or set KAGGLE_CLI." >&2
+  exit 1
+fi
+
+exec "$KAGGLE_CLI" benchmarks tasks models "$@"

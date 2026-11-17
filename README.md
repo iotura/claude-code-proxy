@@ -1,7 +1,7 @@
 # claude-code-proxy
 
 Claude Code, powered by **OpenAI Codex**, **Kimi**, **Grok**, **OpenCode Go**,
-or **Cursor Agent**.
+**Kaggle Model Proxy**, or **Cursor Agent**.
 
 Docs: <https://claude-code-proxy.raine.dev>
 
@@ -65,6 +65,19 @@ For a background service, use `claude-code-proxy serve --no-monitor` and attach
 from another terminal with `claude-code-proxy monitor`. Closing an attached
 dashboard leaves the proxy running.
 
+For a session-scoped Codex setup, authenticate once with
+`claude-code-proxy codex auth login`, then install the launcher from the repo
+root:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$(pwd -P)/scripts/codex-code" "$HOME/.local/bin/codex-code"
+```
+
+From any project directory, `codex-code` starts the proxy if needed and stops
+the server when Claude Code exits. It reuses an already-running proxy. Resume
+with `codex-code --resume <session-id>`.
+
 Start Claude Code in another:
 
 ```sh
@@ -100,7 +113,99 @@ The opt-in Images API returns base64 image data and consumes the signed-in accou
 | Kimi         | kimi.com with Kimi Code access | `kimi-for-coding` and aliases                   |
 | Grok         | grok.com                       | Registered Grok models                          |
 | OpenCode Go  | OpenCode Go subscription       | Non-conflicting IDs and `opencode-go/<model-id>` |
+| Kaggle       | Kaggle account with Benchmarks access | `kaggle/<Kaggle model slug>` |
 | Cursor Agent | Cursor account                 | Cursor aliases and `cursor:<model-id>` prefixes |
+
+### Switch between Kaggle and Anthropic
+
+The Kaggle backend uses Kaggle's Anthropic-compatible Messages endpoint. It
+needs Claude Code, the Kaggle CLI, Python 3.11+, and Rust/Cargo (the launcher
+builds this proxy from source the first time it starts).
+
+Install Rust/Cargo with [rustup](https://rustup.rs) if they are not already
+installed. Install Claude Code using
+[Anthropic's instructions](https://code.claude.com/docs/en/getting-started).
+Install the official Kaggle CLI in an isolated Python environment with either
+`pipx` or `uv`:
+
+```sh
+pipx install kaggle
+# or: uv tool install kaggle
+```
+
+Authenticate the Kaggle CLI in one of these ways:
+
+```sh
+kaggle auth login
+```
+
+This opens Kaggle's browser login flow. Alternatively, create an API token in
+[Kaggle account settings](https://www.kaggle.com/settings), save the token
+string in `~/.kaggle/access_token`, and restrict the file permissions:
+
+```sh
+mkdir -p "$HOME/.kaggle"
+chmod 700 "$HOME/.kaggle"
+${EDITOR:-nano} "$HOME/.kaggle/access_token"
+chmod 600 "$HOME/.kaggle/access_token"
+```
+
+Paste only the token string into that file. Never put it in the repository.
+The Kaggle CLI uses this account credential to mint the short-lived Model Proxy
+key used by the local server.
+
+Install the launchers on your `PATH` from the repository root:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$(pwd -P)/scripts/claude-kaggle" "$HOME/.local/bin/kaggle-code"
+ln -sfn "$(pwd -P)/scripts/claude-official" "$HOME/.local/bin/claude-official"
+```
+
+Make sure `$HOME/.local/bin` is on your `PATH`, then configure the Kaggle CLI
+path once from this checkout:
+
+```sh
+scripts/configure-kaggle "$(command -v kaggle)"
+```
+
+This saves the Kaggle CLI path and credential-file path under
+`~/.config/claude-code-proxy/`. You can rerun it if you move the repository or
+Kaggle CLI. It does not copy your Kaggle account token.
+
+From your project directory, run the installed `kaggle-code` command:
+
+```sh
+kaggle-code --continue
+```
+
+`kaggle-code` checks for a local proxy. If none is running, it refreshes the
+short-lived Kaggle key through your Kaggle CLI login, starts a temporary server,
+and stops that server when Claude Code exits. If a server is already running,
+the command reuses it and leaves it running afterward. The key is stored in
+`~/.config/claude-code-proxy/kaggle.env` with mode 0600.
+
+For a long-running server shared by multiple Claude Code sessions, start
+`scripts/serve-kaggle` from this checkout in a separate terminal. Stop it with
+Ctrl+C when you are done. A `kaggle-code` process reuses this server and does
+not stop it.
+
+Each server start refreshes Kaggle's local-development settings. By default,
+`kaggle-code` advertises only Kaggle Claude Sonnet 5 in the `/model` picker.
+Keep this conservative default because other Kaggle models may reject Claude
+Code's tool schemas or request options. You can explicitly allow additional
+models with `CCP_KAGGLE_MODELS` after confirming compatibility. To view
+Kaggle's full live benchmark catalog, run `scripts/kaggle-models`; that catalog
+is distinct from the local Model Proxy model list.
+
+Resume a particular session with `kaggle-code --resume <session-id>`. The
+default model remains Kaggle Claude Sonnet 5; see the allowlist note above
+before enabling another model.
+
+To use your normal Anthropic setup, run
+`"$CCP_PROXY_DIR/scripts/claude-official" --continue` from the same project
+directory. The launch scripts keep Claude Code's global settings unchanged.
+The previous command name `claude-kaggle` remains available as an alias.
 
 Run `claude-code-proxy models` for the current catalog or
 `claude-code-proxy models --full` for every dynamic Cursor alias.
